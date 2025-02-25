@@ -1,0 +1,8 @@
+version: '3'
+services:
+  ft_ping:
+    build: .
+    container_name: ft_ping_container
+    volumes:
+      - .:/usr/src/app  # ホストのカレントディレクトリをコンテナの作業ディレクトリにマウント
+    tty: true           # インタラクティブな端末を確保
