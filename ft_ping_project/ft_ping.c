@@ -7,6 +7,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <netinet/ip_icmp.h>  // ICMPヘッダ用
+#include <netinet/ip.h>       // IPヘッダ用（TTL取得のため）
 #include <sys/time.h>
 #include "util/print_help.h"       // ヘルプ表示用の関数が定義されたヘッダ
 #include "util/compute_checksum.h" // compute_checksum関数が定義されたヘッダ
@@ -76,81 +77,83 @@ int main(int argc, char *argv[]) {
     }
     printf("Raw socket created successfully.\n");
 
-    // ---- ICMPエコーリクエストパケットの作成 ----
-    char packet[PACKET_SIZE];
-    memset(packet, 0, sizeof(packet));
+    int seq = 1;  // シーケンス番号の初期化
+    while (1) {
+        char packet[PACKET_SIZE];
+        memset(packet, 0, sizeof(packet));
 
-    // ICMPヘッダを構築
-    struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
-    icmp_hdr->type = ICMP_ECHO;             // エコーリクエスト（タイプ8）
-    icmp_hdr->code = 0;                     // コードは0
-    icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDの下位16ビット）
-    icmp_hdr->un.echo.sequence = 1;         // シーケンス番号（初回なので1）
+        // ---- ICMPエコーリクエストパケットの作成 ----
+        struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
+        icmp_hdr->type = ICMP_ECHO;             // エコーリクエスト（タイプ8）
+        icmp_hdr->code = 0;                     // コードは0
+        icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDの下位16ビット）
+        icmp_hdr->un.echo.sequence = seq;         // シーケンス番号
+        icmp_hdr->checksum = 0;                   // チェックサム計算前は0に設定
+        icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE); // チェックサム計算
 
-    // チェックサム計算前は0に設定
-    icmp_hdr->checksum = 0;
-    // パケット全体のチェックサムを計算し、設定する
-    icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE);
+        if (verbose_flag) {
+            printf("ICMP Packet created:\n");
+            printf("  Type: %d\n", icmp_hdr->type);
+            printf("  Code: %d\n", icmp_hdr->code);
+            printf("  Identifier: %d\n", icmp_hdr->un.echo.id);
+            printf("  Sequence: %d\n", icmp_hdr->un.echo.sequence);
+            printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
+        }
+        // ----------------------------------------------
 
-    printf("ICMP Packet created:\n");
-    printf("  Type: %d\n", icmp_hdr->type);
-    printf("  Code: %d\n", icmp_hdr->code);
-    printf("  Identifier: %d\n", icmp_hdr->un.echo.id);
-    printf("  Sequence: %d\n", icmp_hdr->un.echo.sequence);
-    printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
-    // ----------------------------------------------
+        // ---- RTT計測用のタイムスタンプ取得（送信直前） ----
+        struct timeval start, end;
+        if (gettimeofday(&start, NULL) < 0) {
+            perror("gettimeofday");
+            break;
+        }
 
-    // ---- RTT計測用のタイムスタンプ取得（送信直前） ----
-    struct timeval start, end;
-    if (gettimeofday(&start, NULL) < 0) {
-        perror("gettimeofday");
-        freeaddrinfo(res);
-        close(sockfd);
-        return EXIT_FAILURE;
+        // ---- パケットの送信 ----
+        ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, res->ai_addr, res->ai_addrlen);
+        if (sent_bytes < 0) {
+            perror("sendto");
+            break;
+        }
+
+        // ---- 応答パケットの受信 ----
+        char recv_buf[1024];
+        struct sockaddr_in reply_addr;
+        socklen_t addr_len = sizeof(reply_addr);
+        ssize_t recv_bytes = recvfrom(sockfd, recv_buf, sizeof(recv_buf), 0,
+                                      (struct sockaddr *)&reply_addr, &addr_len);
+        if (recv_bytes < 0) {
+            perror("recvfrom");
+            break;
+        }
+
+        // ---- RTT計測用のタイムスタンプ取得（受信直後） ----
+        if (gettimeofday(&end, NULL) < 0) {
+            perror("gettimeofday");
+            break;
+        }
+
+        // RTT（ラウンドトリップタイム）の計算（ミリ秒単位）
+        double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
+                     (end.tv_usec - start.tv_usec) / 1000.0;
+
+        // 受信したパケットの送信元IPアドレスの表示
+        char reply_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
+
+        // 受信したパケットからIPヘッダを取得し、TTLを抽出する
+        struct ip *ip_hdr = (struct ip *) recv_buf;
+        int ttl = ip_hdr->ip_ttl;
+
+        // 標準のpingコマンドに近い出力例：
+        // "64 bytes from nrt13s55-in-f14.1e100.net (142.250.207.46): icmp_seq=1 ttl=37 time=39.0 ms"
+        printf("%zd bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
+               recv_bytes, reply_ip, seq, ttl, rtt);
+
+        seq++;  // シーケンス番号をインクリメント
+
+        // 次のパケット送信まで1秒待機（オプションで調整可）
+        sleep(1);
     }
-
-    // ---- パケットの送信 ----
-    ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, res->ai_addr, res->ai_addrlen);
-    if (sent_bytes < 0) {
-        perror("sendto");
-        freeaddrinfo(res);
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
-    printf("Sent %zd bytes to %s\n", sent_bytes, ipstr);
-
-    // ---- 応答パケットの受信 ----
-    char recv_buf[1024];
-    struct sockaddr_in reply_addr;
-    socklen_t addr_len = sizeof(reply_addr);
-    ssize_t recv_bytes = recvfrom(sockfd, recv_buf, sizeof(recv_buf), 0,
-                                  (struct sockaddr *)&reply_addr, &addr_len);
-    if (recv_bytes < 0) {
-        perror("recvfrom");
-        freeaddrinfo(res);
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
-    
-    // ---- RTT計測用のタイムスタンプ取得（受信直後） ----
-    if (gettimeofday(&end, NULL) < 0) {
-        perror("gettimeofday");
-        freeaddrinfo(res);
-        close(sockfd);
-        return EXIT_FAILURE;
-    }
-
-    // RTT（ラウンドトリップタイム）の計算（ミリ秒単位）
-    double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
-                 (end.tv_usec - start.tv_usec) / 1000.0;
-    
-    // 受信したパケットの送信元IPアドレスの表示
-    char reply_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
-    printf("Received %zd bytes from %s\n", recv_bytes, reply_ip);
-    printf("RTT: %.2f ms\n", rtt);
-
-    // 後続の処理（パケット解析等）はここに追加可能
 
     freeaddrinfo(res);
     close(sockfd);
