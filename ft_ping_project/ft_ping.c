@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <math.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -13,6 +15,47 @@
 #include "util/compute_checksum.h" // compute_checksum関数が定義されたヘッダ
 
 #define PACKET_SIZE 64
+
+/* 
+ * グローバル変数（シグナルハンドラとメインループ間で統計情報を共有）
+ */
+volatile sig_atomic_t packets_transmitted = 0;
+volatile sig_atomic_t packets_received = 0;
+double rtt_sum = 0.0;
+double rtt_sum2 = 0.0;
+double rtt_min = 1e9;
+double rtt_max = 0.0;
+struct timeval global_start_time; // 最初の送信時刻
+char global_destination[256] = {0}; // 宛先ホスト名
+
+/* SIGINT（Ctrl+C）シグナルハンドラ */
+void sigint_handler(int signo) {
+    (void) signo; // 未使用引数の警告を回避
+    struct timeval now;
+    if (gettimeofday(&now, NULL) < 0) {
+        perror("gettimeofday");
+        exit(EXIT_FAILURE);
+    }
+    long total_time_ms = (now.tv_sec - global_start_time.tv_sec) * 1000 +
+                         (now.tv_usec - global_start_time.tv_usec) / 1000;
+
+    int loss = 0;
+    if (packets_transmitted > 0)
+        loss = ((packets_transmitted - packets_received) * 100) / packets_transmitted;
+    
+    double avg = (packets_received > 0) ? rtt_sum / packets_received : 0.0;
+    double variance = (packets_received > 0) ? (rtt_sum2 / packets_received) - (avg * avg) : 0.0;
+    if (variance < 0)
+        variance = 0;
+    double mdev = sqrt(variance);
+    
+    printf("\n--- %s ping statistics ---\n", global_destination);
+    printf("%d packets transmitted, %d received, %d%% packet loss, time %ldms\n",
+           packets_transmitted, packets_received, loss, total_time_ms);
+    printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n",
+           rtt_min, avg, rtt_max, mdev);
+    exit(EXIT_SUCCESS);
+}
 
 int main(int argc, char *argv[]) {
     int opt;
@@ -33,7 +76,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // オプション解析後、非オプション引数は optind 以降に残る
+    // 非オプション引数は optind 以降に残る
     if (optind >= argc) {
         fprintf(stderr, "Error: Destination argument is required.\n");
         print_help(argv[0]);
@@ -41,6 +84,8 @@ int main(int argc, char *argv[]) {
     }
 
     char *destination = argv[optind];
+    // グローバル変数にコピー（統計出力用）
+    strncpy(global_destination, destination, sizeof(global_destination)-1);
     printf("Destination: %s\n", destination);
     if (verbose_flag) {
         printf("Verbose mode enabled.\n");
@@ -77,16 +122,28 @@ int main(int argc, char *argv[]) {
     }
     printf("Raw socket created successfully.\n");
 
+    // SIGINT（Ctrl+C）シグナルを捕捉する
+    signal(SIGINT, sigint_handler);
+
+    // 送信開始前の時刻を記録（統計で利用）
+    if (gettimeofday(&global_start_time, NULL) < 0) {
+        perror("gettimeofday");
+        freeaddrinfo(res);
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+
     int seq = 1;  // シーケンス番号の初期化
+
     while (1) {
         char packet[PACKET_SIZE];
         memset(packet, 0, sizeof(packet));
 
         // ---- ICMPエコーリクエストパケットの作成 ----
         struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
-        icmp_hdr->type = ICMP_ECHO;             // エコーリクエスト（タイプ8）
-        icmp_hdr->code = 0;                     // コードは0
-        icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDの下位16ビット）
+        icmp_hdr->type = ICMP_ECHO;               // エコーリクエスト（タイプ8）
+        icmp_hdr->code = 0;                       // コードは0
+        icmp_hdr->un.echo.id = getpid() & 0xFFFF;   // 識別子（プロセスIDの下位16ビット）
         icmp_hdr->un.echo.sequence = seq;         // シーケンス番号
         icmp_hdr->checksum = 0;                   // チェックサム計算前は0に設定
         icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE); // チェックサム計算
@@ -114,6 +171,7 @@ int main(int argc, char *argv[]) {
             perror("sendto");
             break;
         }
+        packets_transmitted++;
 
         // ---- 応答パケットの受信 ----
         char recv_buf[1024];
@@ -125,8 +183,6 @@ int main(int argc, char *argv[]) {
             perror("recvfrom");
             break;
         }
-
-        // ---- RTT計測用のタイムスタンプ取得（受信直後） ----
         if (gettimeofday(&end, NULL) < 0) {
             perror("gettimeofday");
             break;
@@ -140,18 +196,24 @@ int main(int argc, char *argv[]) {
         char reply_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
 
-        // 受信したパケットからIPヘッダを取得し、TTLを抽出する
+        // 受信したパケットからIPヘッダを取得してTTLを抽出する
         struct ip *ip_hdr = (struct ip *) recv_buf;
         int ttl = ip_hdr->ip_ttl;
 
-        // 標準のpingコマンドに近い出力例：
-        // "64 bytes from nrt13s55-in-f14.1e100.net (142.250.207.46): icmp_seq=1 ttl=37 time=39.0 ms"
+        // 統計情報の更新
+        packets_received++;
+        rtt_sum += rtt;
+        rtt_sum2 += rtt * rtt;
+        if (rtt < rtt_min) rtt_min = rtt;
+        if (rtt > rtt_max) rtt_max = rtt;
+
+        // 標準的なpingの出力形式に近い形で表示
         printf("%zd bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
                recv_bytes, reply_ip, seq, ttl, rtt);
 
         seq++;  // シーケンス番号をインクリメント
 
-        // 次のパケット送信まで1秒待機（オプションで調整可）
+        // 次のパケット送信まで1秒待機
         sleep(1);
     }
 
