@@ -6,7 +6,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -Werror
 
 # ソースファイルとオブジェクトファイル
-SRC = ft_ping.c
+SRC = ft_ping.c util/print_help.c
 OBJ = $(SRC:.c=.o)
 
 # デフォルトルール：すべてのファイルをコンパイルして実行ファイルを生成

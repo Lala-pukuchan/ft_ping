@@ -9,78 +9,46 @@
 #include <netinet/ip_icmp.h>  // ICMPヘッダ用
 #include <sys/time.h>
 #include <netinet/ip_icmp.h>
+#include "util/print_help.h"  // ヘッダーファイルをインクルード
 
 #define PACKET_SIZE 64
 
-void print_help(const char *progname) {
-    printf("Usage\n");
-    printf("  %s [options] <destination>\n", progname);
-    printf("\n");
-    printf("Options:\n");
-    printf("  <destination>      dns name or ip address\n");
-    printf("  -a                 use audible ping\n");
-    printf("  -A                 use adaptive ping\n");
-    printf("  -B                 sticky source address\n");
-    printf("  -c <count>         stop after <count> replies\n");
-    printf("  -C                 call connect() syscall on socket creation\n");
-    printf("  -D                 print timestamps\n");
-    printf("  -d                 use SO_DEBUG socket option\n");
-    printf("  -e <identifier>    define identifier for ping session\n");
-    printf("  -f                 flood ping\n");
-    printf("  -h                 print help and exit\n");
-    printf("  -I <interface>     either interface name or address\n");
-    printf("  -i <interval>      seconds between sending each packet\n");
-    printf("  -L                 suppress loopback of multicast packets\n");
-    printf("  -l <preload>       send <preload> number of packages while waiting replies\n");
-    printf("  -m <mark>          tag the packets going out\n");
-    printf("  -M <pmtud opt>     define mtu discovery, can be one of <do|dont|want>\n");
-    printf("  -n                 no dns name resolution\n");
-    printf("  -O                 report outstanding replies\n");
-    printf("  -p <pattern>       contents of padding byte\n");
-    printf("  -q                 quiet output\n");
-    printf("  -Q <tclass>        use quality of service <tclass> bits\n");
-    printf("  -s <size>          use <size> as number of data bytes to be sent\n");
-    printf("  -S <size>          use <size> as SO_SNDBUF socket option value\n");
-    printf("  -t <ttl>           define time to live\n");
-    printf("  -U                 print user-to-user latency\n");
-    printf("  -v                 verbose output\n");
-    printf("  -V                 print version and exit\n");
-    printf("  -w <deadline>      reply wait <deadline> in seconds\n");
-    printf("  -W <timeout>       time to wait for response\n");
-    printf("\n");
-    printf("IPv4 options:\n");
-    printf("  -4                 use IPv4\n");
-    printf("  -b                 allow pinging broadcast\n");
-    printf("  -R                 record route\n");
-    printf("  -T <timestamp>     define timestamp, can be one of <tsonly|tsandaddr|tsprespec>\n");
-    printf("\n");
-    printf("IPv6 options:\n");
-    printf("  -6                 use IPv6\n");
-    printf("  -F <flowlabel>     define flow label, default is random\n");
-    printf("  -N <nodeinfo opt>  use icmp6 node info query, try <help> as argument\n");
-    printf("\n");
-    printf("For more details see ping(8).\n");
-}
 
-// チェックサム計算関数（ICMPパケット用）
+// ICMPパケット用のチェックサム計算関数
+// 与えられたバッファ内のデータを16ビット単位で読み込み、
+// 全体の1の補数チェックサムを計算して返す。
 unsigned short compute_checksum(void *buf, int len) {
+    // バッファを16ビット単位で扱うため、unsigned short 型のポインタにキャスト
     unsigned short *data = buf;
+    // チェックサム計算用の変数（32ビットで保持し、オーバーフロー処理も含む）
     unsigned int sum = 0;
     
+    // 2バイト（16ビット）ずつデータを読み込み、加算していくループ
     while (len > 1) {
+        // 現在の16ビット値をsumに加算し、dataポインタを次に進める
         sum += *data++;
+        // 2バイト分読み込んだので、残りの長さを2バイト分減らす
         len -= 2;
     }
+    
+    // データ長が奇数の場合、最後の1バイトが残るので、その1バイトを処理する
     if (len == 1) {
+        // 残りの1バイト分のデータを格納するために、変数を0で初期化
         unsigned short last_byte = 0;
+        // dataをunsigned char型にキャストして、最後の1バイトを取得し、
+        // last_byteの下位バイトにセットする
         *((unsigned char *)&last_byte) = *(unsigned char *)data;
+        // 取得した1バイト分をsumに加算する
         sum += last_byte;
     }
     
-    // 上位16ビットと下位16ビットを足す
+    // sumの上位16ビットと下位16ビットのキャリーを加算して調整する
+    // まず、上位16ビットと下位16ビットを分けて加算する
     sum = (sum >> 16) + (sum & 0xFFFF);
+    // もしさらにキャリーが生じた場合、そのキャリーを再度加算する
     sum += (sum >> 16);
     
+    // 最後に、1の補数（全ビットの反転）を計算してチェックサムとして返す
     return (unsigned short)(~sum);
 }
 
@@ -95,10 +63,10 @@ int main(int argc, char *argv[]) {
                 verbose_flag = 1;
                 break;
             case '?':
-                print_help(argv[0]);
+                print_help(argv[0]);  // print_help関数の呼び出し
                 return EXIT_SUCCESS;
             default:
-                print_help(argv[0]);
+                print_help(argv[0]);  // print_help関数の呼び出し
                 return EXIT_FAILURE;
         }
     }
