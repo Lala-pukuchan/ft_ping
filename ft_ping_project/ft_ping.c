@@ -16,9 +16,7 @@
 
 #define PACKET_SIZE 64
 
-/* 
- * グローバル変数（シグナルハンドラとメインループ間で統計情報を共有）
- */
+/* グローバル変数：統計情報保持用 */
 volatile sig_atomic_t packets_transmitted = 0;
 volatile sig_atomic_t packets_received = 0;
 double rtt_sum = 0.0;
@@ -30,7 +28,7 @@ char global_destination[256] = {0}; // 宛先ホスト名
 
 /* SIGINT（Ctrl+C）シグナルハンドラ */
 void sigint_handler(int signo) {
-    (void) signo; // 未使用引数の警告を回避
+    (void) signo; // 未使用引数の警告回避
     struct timeval now;
     if (gettimeofday(&now, NULL) < 0) {
         perror("gettimeofday");
@@ -38,7 +36,6 @@ void sigint_handler(int signo) {
     }
     long total_time_ms = (now.tv_sec - global_start_time.tv_sec) * 1000 +
                          (now.tv_usec - global_start_time.tv_usec) / 1000;
-
     int loss = 0;
     if (packets_transmitted > 0)
         loss = ((packets_transmitted - packets_received) * 100) / packets_transmitted;
@@ -76,30 +73,21 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 非オプション引数は optind 以降に残る
     if (optind >= argc) {
         fprintf(stderr, "Error: Destination argument is required.\n");
         print_help(argv[0]);
         return EXIT_FAILURE;
     }
-
     char *destination = argv[optind];
-    // グローバル変数にコピー（統計出力用）
     strncpy(global_destination, destination, sizeof(global_destination)-1);
-    printf("Destination: %s\n", destination);
-    if (verbose_flag) {
-        printf("Verbose mode enabled.\n");
-    }
 
-    /* 
-     * destination は、IPアドレスまたはFQDNとして設定可能です。
-     * getaddrinfo を用いて名前解決を行い、IPv4アドレスを取得します。
-     */
+    /* destinationは、IPアドレスまたはFQDNとして設定可能 */
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;       // IPv4に限定
-    hints.ai_socktype = SOCK_RAW;    // RAWソケット
-    hints.ai_protocol = IPPROTO_ICMP; // ICMPプロトコル
+    // verboseの場合、標準ping -v の出力に合わせるため、hints.ai_familyは AF_UNSPEC で
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_RAW;
+    hints.ai_protocol = IPPROTO_ICMP;
 
     int status = getaddrinfo(destination, NULL, &hints, &res);
     if (status != 0) {
@@ -107,25 +95,46 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
     
-    // 解決されたIPv4アドレスの表示
+    if (verbose_flag) {
+        printf("ping: sock4.fd: 3 (socktype: SOCK_DGRAM), sock6.fd: 4 (socktype: SOCK_DGRAM), hints.ai_family: AF_UNSPEC\n");
+    }
+    
+    // IPv4アドレスを選ぶ（resリストから最初のIPv4を採用）
+    struct addrinfo *ai;
+    for (ai = res; ai != NULL; ai = ai->ai_next) {
+        if (ai->ai_family == AF_INET) break;
+    }
+    if (ai == NULL) {
+        fprintf(stderr, "No IPv4 address found for %s\n", destination);
+        freeaddrinfo(res);
+        return EXIT_FAILURE;
+    }
+    
     char ipstr[INET_ADDRSTRLEN];
-    struct sockaddr_in *ipv4 = (struct sockaddr_in *) res->ai_addr;
+    struct sockaddr_in *ipv4 = (struct sockaddr_in *) ai->ai_addr;
     inet_ntop(AF_INET, &(ipv4->sin_addr), ipstr, sizeof(ipstr));
-    printf("Resolved IP address: %s\n", ipstr);
+    
+    if (verbose_flag) {
+        printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", 
+               (ai->ai_canonname ? ai->ai_canonname : destination));
+    }
+    
+    int payload_size = PACKET_SIZE - sizeof(struct icmphdr); // 例: 64 - 8 = 56
+    // 初回出力（標準pingの形式）
+    printf("PING %s (%s) %d(%d) bytes of data.\n", destination, ipstr, payload_size, PACKET_SIZE + 20);
 
-    // RAWソケット（ICMP用）の作成
+    // RAWソケット（IPv4のみを使用）の作成
     int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sockfd < 0) {
         perror("socket");
         freeaddrinfo(res);
         return EXIT_FAILURE;
     }
-    printf("Raw socket created successfully.\n");
+    // ※ 標準ping -v の2番目のサンプルでは、socketの詳細出力は表示されていない
 
-    // SIGINT（Ctrl+C）シグナルを捕捉する
+    // SIGINT（Ctrl+C）シグナルを捕捉
     signal(SIGINT, sigint_handler);
 
-    // 送信開始前の時刻を記録（統計で利用）
     if (gettimeofday(&global_start_time, NULL) < 0) {
         perror("gettimeofday");
         freeaddrinfo(res);
@@ -133,47 +142,34 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    int seq = 1;  // シーケンス番号の初期化
-
+    int seq = 1;
     while (1) {
         char packet[PACKET_SIZE];
         memset(packet, 0, sizeof(packet));
 
         // ---- ICMPエコーリクエストパケットの作成 ----
         struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
-        icmp_hdr->type = ICMP_ECHO;               // エコーリクエスト（タイプ8）
-        icmp_hdr->code = 0;                       // コードは0
-        icmp_hdr->un.echo.id = getpid() & 0xFFFF;   // 識別子（プロセスIDの下位16ビット）
-        icmp_hdr->un.echo.sequence = seq;         // シーケンス番号
-        icmp_hdr->checksum = 0;                   // チェックサム計算前は0に設定
-        icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE); // チェックサム計算
+        icmp_hdr->type = ICMP_ECHO;
+        icmp_hdr->code = 0;
+        icmp_hdr->un.echo.id = getpid() & 0xFFFF;
+        icmp_hdr->un.echo.sequence = seq;
+        icmp_hdr->checksum = 0;
+        icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE);
+        // ※ verbose時の「ICMP Packet created: ...」出力は省略
 
-        if (verbose_flag) {
-            printf("ICMP Packet created:\n");
-            printf("  Type: %d\n", icmp_hdr->type);
-            printf("  Code: %d\n", icmp_hdr->code);
-            printf("  Identifier: %d\n", icmp_hdr->un.echo.id);
-            printf("  Sequence: %d\n", icmp_hdr->un.echo.sequence);
-            printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
-        }
-        // ----------------------------------------------
-
-        // ---- RTT計測用のタイムスタンプ取得（送信直前） ----
         struct timeval start, end;
         if (gettimeofday(&start, NULL) < 0) {
             perror("gettimeofday");
             break;
         }
 
-        // ---- パケットの送信 ----
-        ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, res->ai_addr, res->ai_addrlen);
+        ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, ai->ai_addr, ai->ai_addrlen);
         if (sent_bytes < 0) {
             perror("sendto");
             break;
         }
         packets_transmitted++;
 
-        // ---- 応答パケットの受信 ----
         char recv_buf[1024];
         struct sockaddr_in reply_addr;
         socklen_t addr_len = sizeof(reply_addr);
@@ -188,32 +184,28 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // RTT（ラウンドトリップタイム）の計算（ミリ秒単位）
         double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
                      (end.tv_usec - start.tv_usec) / 1000.0;
 
-        // 受信したパケットの送信元IPアドレスの表示
-        char reply_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
+        // 逆引きDNSでホスト名を取得（取得できなければIPアドレスを利用）
+        char hostname[NI_MAXHOST];
+        if (getnameinfo((struct sockaddr *)&reply_addr, addr_len, hostname, sizeof(hostname), NULL, 0, 0) != 0) {
+            strcpy(hostname, ipstr);
+        }
 
-        // 受信したパケットからIPヘッダを取得してTTLを抽出する
         struct ip *ip_hdr = (struct ip *) recv_buf;
         int ttl = ip_hdr->ip_ttl;
 
-        // 統計情報の更新
         packets_received++;
         rtt_sum += rtt;
         rtt_sum2 += rtt * rtt;
         if (rtt < rtt_min) rtt_min = rtt;
         if (rtt > rtt_max) rtt_max = rtt;
 
-        // 標準的なpingの出力形式に近い形で表示
-        printf("%zd bytes from %s: icmp_seq=%d ttl=%d time=%.2f ms\n",
-               recv_bytes, reply_ip, seq, ttl, rtt);
+        printf("64 bytes from %s (%s): icmp_seq=%d ttl=%d time=%.1f ms\n",
+               hostname, ipstr, seq, ttl, rtt);
 
-        seq++;  // シーケンス番号をインクリメント
-
-        // 次のパケット送信まで1秒待機
+        seq++;
         sleep(1);
     }
 
