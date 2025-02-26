@@ -8,9 +8,8 @@
 #include <arpa/inet.h>
 #include <netinet/ip_icmp.h>  // ICMPヘッダ用
 #include <sys/time.h>
-#include <netinet/ip_icmp.h>
-#include "util/print_help.h"  // ヘッダーファイルをインクルード
-#include "util/compute_checksum.h"
+#include "util/print_help.h"       // ヘルプ表示用の関数が定義されたヘッダ
+#include "util/compute_checksum.h" // compute_checksum関数が定義されたヘッダ
 
 #define PACKET_SIZE 64
 
@@ -48,7 +47,7 @@ int main(int argc, char *argv[]) {
 
     /* 
      * destination は、IPアドレスまたはFQDNとして設定可能です。
-     * getaddrinfoを用いて名前解決を行い、IPv4アドレスを取得します。
+     * getaddrinfo を用いて名前解決を行い、IPv4アドレスを取得します。
      */
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
@@ -101,8 +100,16 @@ int main(int argc, char *argv[]) {
     printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
     // ----------------------------------------------
 
+    // ---- RTT計測用のタイムスタンプ取得（送信直前） ----
+    struct timeval start, end;
+    if (gettimeofday(&start, NULL) < 0) {
+        perror("gettimeofday");
+        freeaddrinfo(res);
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+
     // ---- パケットの送信 ----
-    // sendtoを用いて、作成したICMPパケットを指定した宛先に送信する
     ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, res->ai_addr, res->ai_addrlen);
     if (sent_bytes < 0) {
         perror("sendto");
@@ -113,13 +120,9 @@ int main(int argc, char *argv[]) {
     printf("Sent %zd bytes to %s\n", sent_bytes, ipstr);
 
     // ---- 応答パケットの受信 ----
-    // 応答パケットを受信するためのバッファを用意する
     char recv_buf[1024];
-    // 受信元アドレスを格納するための構造体
     struct sockaddr_in reply_addr;
     socklen_t addr_len = sizeof(reply_addr);
-    
-    // recvfromを用いてICMPエコー応答パケットを受信する
     ssize_t recv_bytes = recvfrom(sockfd, recv_buf, sizeof(recv_buf), 0,
                                   (struct sockaddr *)&reply_addr, &addr_len);
     if (recv_bytes < 0) {
@@ -129,10 +132,23 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
     
-    // 受信したパケットの送信元IPアドレスを表示する
+    // ---- RTT計測用のタイムスタンプ取得（受信直後） ----
+    if (gettimeofday(&end, NULL) < 0) {
+        perror("gettimeofday");
+        freeaddrinfo(res);
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+
+    // RTT（ラウンドトリップタイム）の計算（ミリ秒単位）
+    double rtt = (end.tv_sec - start.tv_sec) * 1000.0 +
+                 (end.tv_usec - start.tv_usec) / 1000.0;
+    
+    // 受信したパケットの送信元IPアドレスの表示
     char reply_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
     printf("Received %zd bytes from %s\n", recv_bytes, reply_ip);
+    printf("RTT: %.2f ms\n", rtt);
 
     // 後続の処理（パケット解析等）はここに追加可能
 
