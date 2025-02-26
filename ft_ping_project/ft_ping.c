@@ -6,6 +6,11 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <netinet/ip_icmp.h>  // ICMPヘッダ用
+#include <sys/time.h>
+#include <netinet/ip_icmp.h>
+
+#define PACKET_SIZE 64
 
 void print_help(const char *progname) {
     printf("Usage\n");
@@ -57,6 +62,28 @@ void print_help(const char *progname) {
     printf("For more details see ping(8).\n");
 }
 
+// チェックサム計算関数（ICMPパケット用）
+unsigned short compute_checksum(void *buf, int len) {
+    unsigned short *data = buf;
+    unsigned int sum = 0;
+    
+    while (len > 1) {
+        sum += *data++;
+        len -= 2;
+    }
+    if (len == 1) {
+        unsigned short last_byte = 0;
+        *((unsigned char *)&last_byte) = *(unsigned char *)data;
+        sum += last_byte;
+    }
+    
+    // 上位16ビットと下位16ビットを足す
+    sum = (sum >> 16) + (sum & 0xFFFF);
+    sum += (sum >> 16);
+    
+    return (unsigned short)(~sum);
+}
+
 int main(int argc, char *argv[]) {
     int opt;
     int verbose_flag = 0;
@@ -95,8 +122,8 @@ int main(int argc, char *argv[]) {
      */
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;      // IPv4 に限定
-    hints.ai_socktype = SOCK_RAW;   // RAW ソケット
+    hints.ai_family = AF_INET;       // IPv4 に限定
+    hints.ai_socktype = SOCK_RAW;    // RAW ソケット
     hints.ai_protocol = IPPROTO_ICMP; // ICMP プロトコル
 
     int status = getaddrinfo(destination, NULL, &hints, &res);
@@ -120,7 +147,31 @@ int main(int argc, char *argv[]) {
     }
     printf("Raw socket created successfully.\n");
 
-    // 今後、ここからICMPパケットの送受信等の処理を実装していきます
+    // ---- ICMPエコーリクエストパケットの作成 ----
+    char packet[PACKET_SIZE];
+    memset(packet, 0, sizeof(packet));
+
+    // ICMPヘッダを構築
+    struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
+    icmp_hdr->type = ICMP_ECHO;    // エコーリクエスト（8）
+    icmp_hdr->code = 0;            // コードは0
+    icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDを利用）
+    icmp_hdr->un.echo.sequence = 1;            // シーケンス番号（最初のパケットなので1）
+
+    // チェックサム計算前は0に設定
+    icmp_hdr->checksum = 0;
+    // パケット全体のチェックサムを計算して設定
+    icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE);
+
+    printf("ICMP Packet created:\n");
+    printf("  Type: %d\n", icmp_hdr->type);
+    printf("  Code: %d\n", icmp_hdr->code);
+    printf("  Identifier: %d\n", icmp_hdr->un.echo.id);
+    printf("  Sequence: %d\n", icmp_hdr->un.echo.sequence);
+    printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
+    // ----------------------------------------------
+
+    // 今後、ここから送信および受信の処理を実装していきます
 
     freeaddrinfo(res);
     close(sockfd);
