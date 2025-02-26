@@ -4,9 +4,11 @@ NAME = ft_ping
 # コンパイラとフラグ設定
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror
+# カレントディレクトリをインクルードパスに追加
+CFLAGS += -I.
 
 # ソースファイルとオブジェクトファイル
-SRC = ft_ping.c util/print_help.c
+SRC = ft_ping.c util/print_help.c util/compute_checksum.c
 OBJ = $(SRC:.c=.o)
 
 # デフォルトルール：すべてのファイルをコンパイルして実行ファイルを生成

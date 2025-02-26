@@ -10,63 +10,25 @@
 #include <sys/time.h>
 #include <netinet/ip_icmp.h>
 #include "util/print_help.h"  // ヘッダーファイルをインクルード
+#include "util/compute_checksum.h"
 
 #define PACKET_SIZE 64
-
-
-// ICMPパケット用のチェックサム計算関数
-// 与えられたバッファ内のデータを16ビット単位で読み込み、
-// 全体の1の補数チェックサムを計算して返す。
-unsigned short compute_checksum(void *buf, int len) {
-    // バッファを16ビット単位で扱うため、unsigned short 型のポインタにキャスト
-    unsigned short *data = buf;
-    // チェックサム計算用の変数（32ビットで保持し、オーバーフロー処理も含む）
-    unsigned int sum = 0;
-    
-    // 2バイト（16ビット）ずつデータを読み込み、加算していくループ
-    while (len > 1) {
-        // 現在の16ビット値をsumに加算し、dataポインタを次に進める
-        sum += *data++;
-        // 2バイト分読み込んだので、残りの長さを2バイト分減らす
-        len -= 2;
-    }
-    
-    // データ長が奇数の場合、最後の1バイトが残るので、その1バイトを処理する
-    if (len == 1) {
-        // 残りの1バイト分のデータを格納するために、変数を0で初期化
-        unsigned short last_byte = 0;
-        // dataをunsigned char型にキャストして、最後の1バイトを取得し、
-        // last_byteの下位バイトにセットする
-        *((unsigned char *)&last_byte) = *(unsigned char *)data;
-        // 取得した1バイト分をsumに加算する
-        sum += last_byte;
-    }
-    
-    // sumの上位16ビットと下位16ビットのキャリーを加算して調整する
-    // まず、上位16ビットと下位16ビットを分けて加算する
-    sum = (sum >> 16) + (sum & 0xFFFF);
-    // もしさらにキャリーが生じた場合、そのキャリーを再度加算する
-    sum += (sum >> 16);
-    
-    // 最後に、1の補数（全ビットの反転）を計算してチェックサムとして返す
-    return (unsigned short)(~sum);
-}
 
 int main(int argc, char *argv[]) {
     int opt;
     int verbose_flag = 0;
 
-    // オプション解析: -v は verbose、-? はヘルプ表示
+    // オプション解析: -v はverbose、-? はヘルプ表示
     while ((opt = getopt(argc, argv, "v?")) != -1) {
         switch (opt) {
             case 'v':
                 verbose_flag = 1;
                 break;
             case '?':
-                print_help(argv[0]);  // print_help関数の呼び出し
+                print_help(argv[0]);
                 return EXIT_SUCCESS;
             default:
-                print_help(argv[0]);  // print_help関数の呼び出し
+                print_help(argv[0]);
                 return EXIT_FAILURE;
         }
     }
@@ -85,14 +47,14 @@ int main(int argc, char *argv[]) {
     }
 
     /* 
-     * destination は、IPアドレスまたはFQDNとして設定できます。
-     * 以下の処理では getaddrinfo を用いて名前解決を行い、IPv4アドレスを取得します。
+     * destination は、IPアドレスまたはFQDNとして設定可能です。
+     * getaddrinfoを用いて名前解決を行い、IPv4アドレスを取得します。
      */
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;       // IPv4 に限定
-    hints.ai_socktype = SOCK_RAW;    // RAW ソケット
-    hints.ai_protocol = IPPROTO_ICMP; // ICMP プロトコル
+    hints.ai_family = AF_INET;       // IPv4に限定
+    hints.ai_socktype = SOCK_RAW;    // RAWソケット
+    hints.ai_protocol = IPPROTO_ICMP; // ICMPプロトコル
 
     int status = getaddrinfo(destination, NULL, &hints, &res);
     if (status != 0) {
@@ -121,14 +83,14 @@ int main(int argc, char *argv[]) {
 
     // ICMPヘッダを構築
     struct icmphdr *icmp_hdr = (struct icmphdr *) packet;
-    icmp_hdr->type = ICMP_ECHO;    // エコーリクエスト（8）
-    icmp_hdr->code = 0;            // コードは0
-    icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDを利用）
-    icmp_hdr->un.echo.sequence = 1;            // シーケンス番号（最初のパケットなので1）
+    icmp_hdr->type = ICMP_ECHO;             // エコーリクエスト（タイプ8）
+    icmp_hdr->code = 0;                     // コードは0
+    icmp_hdr->un.echo.id = getpid() & 0xFFFF;  // 識別子（プロセスIDの下位16ビット）
+    icmp_hdr->un.echo.sequence = 1;         // シーケンス番号（初回なので1）
 
     // チェックサム計算前は0に設定
     icmp_hdr->checksum = 0;
-    // パケット全体のチェックサムを計算して設定
+    // パケット全体のチェックサムを計算し、設定する
     icmp_hdr->checksum = compute_checksum(packet, PACKET_SIZE);
 
     printf("ICMP Packet created:\n");
@@ -139,7 +101,40 @@ int main(int argc, char *argv[]) {
     printf("  Checksum: 0x%x\n", icmp_hdr->checksum);
     // ----------------------------------------------
 
-    // 今後、ここから送信および受信の処理を実装していきます
+    // ---- パケットの送信 ----
+    // sendtoを用いて、作成したICMPパケットを指定した宛先に送信する
+    ssize_t sent_bytes = sendto(sockfd, packet, PACKET_SIZE, 0, res->ai_addr, res->ai_addrlen);
+    if (sent_bytes < 0) {
+        perror("sendto");
+        freeaddrinfo(res);
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+    printf("Sent %zd bytes to %s\n", sent_bytes, ipstr);
+
+    // ---- 応答パケットの受信 ----
+    // 応答パケットを受信するためのバッファを用意する
+    char recv_buf[1024];
+    // 受信元アドレスを格納するための構造体
+    struct sockaddr_in reply_addr;
+    socklen_t addr_len = sizeof(reply_addr);
+    
+    // recvfromを用いてICMPエコー応答パケットを受信する
+    ssize_t recv_bytes = recvfrom(sockfd, recv_buf, sizeof(recv_buf), 0,
+                                  (struct sockaddr *)&reply_addr, &addr_len);
+    if (recv_bytes < 0) {
+        perror("recvfrom");
+        freeaddrinfo(res);
+        close(sockfd);
+        return EXIT_FAILURE;
+    }
+    
+    // 受信したパケットの送信元IPアドレスを表示する
+    char reply_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &reply_addr.sin_addr, reply_ip, sizeof(reply_ip));
+    printf("Received %zd bytes from %s\n", recv_bytes, reply_ip);
+
+    // 後続の処理（パケット解析等）はここに追加可能
 
     freeaddrinfo(res);
     close(sockfd);
