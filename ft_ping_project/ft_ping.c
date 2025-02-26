@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 void print_help(const char *progname) {
     printf("Usage\n");
@@ -15,9 +20,7 @@ void print_help(const char *progname) {
     printf("  -C                 call connect() syscall on socket creation\n");
     printf("  -D                 print timestamps\n");
     printf("  -d                 use SO_DEBUG socket option\n");
-    printf("  -e <identifier>    define identifier for ping session, default is random for\n");
-    printf("                     SOCK_RAW and kernel defined for SOCK_DGRAM\n");
-    printf("                     Imply using SOCK_RAW (for IPv4 only for identifier 0)\n");
+    printf("  -e <identifier>    define identifier for ping session\n");
     printf("  -f                 flood ping\n");
     printf("  -h                 print help and exit\n");
     printf("  -I <interface>     either interface name or address\n");
@@ -58,7 +61,7 @@ int main(int argc, char *argv[]) {
     int opt;
     int verbose_flag = 0;
 
-    // オプション解析: -v はverbose、-? はヘルプ表示
+    // オプション解析: -v は verbose、-? はヘルプ表示
     while ((opt = getopt(argc, argv, "v?")) != -1) {
         switch (opt) {
             case 'v':
@@ -81,12 +84,45 @@ int main(int argc, char *argv[]) {
     }
 
     char *destination = argv[optind];
-
-    // 解析結果の表示（ここから実際の処理を実装）
     printf("Destination: %s\n", destination);
     if (verbose_flag) {
         printf("Verbose mode enabled.\n");
     }
 
+    /* 
+     * destination は、IPアドレスまたはFQDNとして設定できます。
+     * 以下の処理では getaddrinfo を用いて名前解決を行い、IPv4アドレスを取得します。
+     */
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;      // IPv4 に限定
+    hints.ai_socktype = SOCK_RAW;   // RAW ソケット
+    hints.ai_protocol = IPPROTO_ICMP; // ICMP プロトコル
+
+    int status = getaddrinfo(destination, NULL, &hints, &res);
+    if (status != 0) {
+        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
+        return EXIT_FAILURE;
+    }
+    
+    // 解決されたIPv4アドレスの表示
+    char ipstr[INET_ADDRSTRLEN];
+    struct sockaddr_in *ipv4 = (struct sockaddr_in *) res->ai_addr;
+    inet_ntop(AF_INET, &(ipv4->sin_addr), ipstr, sizeof(ipstr));
+    printf("Resolved IP address: %s\n", ipstr);
+
+    // RAWソケット（ICMP用）の作成
+    int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sockfd < 0) {
+        perror("socket");
+        freeaddrinfo(res);
+        return EXIT_FAILURE;
+    }
+    printf("Raw socket created successfully.\n");
+
+    // 今後、ここからICMPパケットの送受信等の処理を実装していきます
+
+    freeaddrinfo(res);
+    close(sockfd);
     return EXIT_SUCCESS;
 }

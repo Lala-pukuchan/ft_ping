@@ -11,7 +11,7 @@ docker exec -it ft_ping_container bash
 - [☑️] 開発環境の準備
 - [☑️] プロジェクト用ディレクトリを作成し、Makefileやソースコードファイル（例: ft_ping.c）のひな形を作成する。
 - [☑️] コマンドライン引数の解析
-- [] ネットワーク通信の準備
+- [☑️] ネットワーク通信の準備
 - [] getaddrinfo 関数などを用いてターゲットホストのIPアドレスを解決し、RAWソケット（ICMP用）を作成する。
 - [] ICMPパケットの作成
 - [] ICMPヘッダ（type, code, checksum, id, sequence）を組み立て、エコーリクエストパケットを作成する（チェックサムの計算を含む）。
