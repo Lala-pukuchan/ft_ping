@@ -216,13 +216,9 @@ int main(int argc, char *argv[]) {
         struct ip *ip_hdr = (struct ip *) recv_buf;
         int ttl = ip_hdr->ip_ttl;
 
-        // ---- 逆引きDNSでホスト名を取得 ----
-        // getnameinfoを使用して、送信元のアドレスからホスト名を取得
+        // ---- 逆引きDNSを行わず、入力されたFQDNをそのまま利用する ----
         char hostname[NI_MAXHOST];
-        if (getnameinfo((struct sockaddr *)&reply_addr, addr_len, hostname, sizeof(hostname), NULL, 0, 0) != 0) {
-            // 取得できなければ、IPアドレス文字列を代用
-            strcpy(hostname, ipstr);
-        }
+        strncpy(hostname, global_destination, sizeof(hostname) - 1);
 
         // ---- 統計情報の更新 ----
         packets_received++;
